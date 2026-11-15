@@ -683,6 +683,14 @@
   font-family: var(--font-sans);
 }
 
+.map-popup-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-inline-end: 14px;
+}
+
 .map-popup-badge {
   align-self: flex-start;
   color: #ffffff;
@@ -690,6 +698,22 @@
   font-weight: 600;
   padding: 2px 7px;
   border-radius: 999px;
+}
+
+.map-popup-visit-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.map-popup-visit-btn.is-active {
+  border-color: var(--success);
+  background: var(--success-soft);
+  color: var(--success);
 }
 
 .map-popup-title {

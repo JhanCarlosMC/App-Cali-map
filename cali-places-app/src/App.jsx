@@ -25,6 +25,7 @@ import {
 import './App.css';
 
 const STORAGE_KEY = 'cali-places-app:v1';
+const TOUR_STORAGE_KEY = 'cali-places-app:tour-v1';
 
 function loadInitialPlaces() {
   try {
@@ -48,6 +49,17 @@ function loadInitialPlaces() {
   return DEFAULT_PLACES;
 }
 
+function loadInitialTourIds() {
+  try {
+    const raw = localStorage.getItem(TOUR_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function App() {
   const [places, setPlaces] = useState(loadInitialPlaces);
   const [selectedPlaceId, setSelectedPlaceId] = useState(null);
@@ -69,10 +81,29 @@ export default function App() {
   const [pickedCoords, setPickedCoords] = useState(null);
 
   const [mobilePanel, setMobilePanel] = useState('map');
-  const [tourPlaceIds, setTourPlaceIds] = useState([]);
+  const [tourPlaceIds, setTourPlaceIds] = useState(loadInitialTourIds);
   const [activeRoute, setActiveRoute] = useState(null);
   const [routeHint, setRouteHint] = useState('');
   const routeAbortRef = useRef(null);
+  const hintTimerRef = useRef(null);
+
+  const showHint = (msg) => {
+    if (hintTimerRef.current) {
+      clearTimeout(hintTimerRef.current);
+    }
+    setRouteHint(msg);
+    hintTimerRef.current = setTimeout(() => {
+      setRouteHint('');
+      hintTimerRef.current = null;
+    }, 3500);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (routeAbortRef.current) routeAbortRef.current.abort();
+      if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     try {
@@ -81,6 +112,14 @@ export default function App() {
       // Ignore storage quota errors
     }
   }, [places]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(TOUR_STORAGE_KEY, JSON.stringify(tourPlaceIds));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [tourPlaceIds]);
 
   const requestGpsLocation = (shouldCenter = false) => {
     if (!('geolocation' in navigator)) {
@@ -122,12 +161,20 @@ export default function App() {
 
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
+        const nextLat = pos.coords.latitude;
+        const nextLng = pos.coords.longitude;
+        const nextAcc = pos.coords.accuracy;
+
         setUserLocation((prev) => {
           if (prev?.isSimulated) return prev;
+          if (prev) {
+            const movedKm = calculateDistanceKm(prev.lat, prev.lng, nextLat, nextLng);
+            if (movedKm < 0.015) return prev;
+          }
           return {
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude,
-            accuracy: pos.coords.accuracy,
+            lat: nextLat,
+            lng: nextLng,
+            accuracy: nextAcc,
             isSimulated: false,
           };
         });
@@ -177,6 +224,22 @@ export default function App() {
     return filtered;
   }, [placesWithDistance, activeCategory, statusFilter, radiusKm, searchQuery, userLocation]);
 
+  // Keep pinned tour/route/selected places visible on the map even if a sidebar filter is active
+  const mapPlaces = useMemo(() => {
+    const visibleIds = new Set(filteredPlaces.map((p) => p.id));
+    const pinnedIds = new Set(tourPlaceIds);
+    if (selectedPlaceId) pinnedIds.add(selectedPlaceId);
+    if (activeRoute?.place?.id) pinnedIds.add(activeRoute.place.id);
+    if (activeRoute?.stops) {
+      activeRoute.stops.forEach((s) => pinnedIds.add(s.id));
+    }
+
+    const extra = placesWithDistance.filter(
+      (p) => !visibleIds.has(p.id) && pinnedIds.has(p.id)
+    );
+    return extra.length > 0 ? [...filteredPlaces, ...extra] : filteredPlaces;
+  }, [filteredPlaces, placesWithDistance, tourPlaceIds, selectedPlaceId, activeRoute]);
+
   const stats = useMemo(() => {
     const visited = places.filter((p) => p.visited).length;
     return {
@@ -192,10 +255,24 @@ export default function App() {
     );
   };
 
+  const handleCloseRoute = () => {
+    if (routeAbortRef.current) {
+      routeAbortRef.current.abort();
+    }
+    setActiveRoute(null);
+  };
+
   const handleDeletePlace = (id) => {
     setPlaces((prev) => prev.filter((p) => p.id !== id));
+    setTourPlaceIds((prev) => prev.filter((item) => item !== id));
     if (selectedPlaceId === id) {
       setSelectedPlaceId(null);
+    }
+    if (
+      activeRoute?.place?.id === id ||
+      activeRoute?.stops?.some((s) => s.id === id)
+    ) {
+      handleCloseRoute();
     }
   };
 
@@ -318,14 +395,12 @@ export default function App() {
       .filter(Boolean);
 
     if (selectedPlaces.length === 0) {
-      setRouteHint('Toca los puntos en el mapa y presiona "+ Ruta" para armar tu recorrido.');
-      setTimeout(() => setRouteHint(''), 3500);
+      showHint('Toca los puntos en el mapa y presiona "+ Ruta" para armar tu recorrido.');
       return;
     }
 
     if (selectedPlaces.length === 1 && !userLocation) {
-      setRouteHint('Elige al menos 2 lugares en el mapa o activa tu GPS.');
-      setTimeout(() => setRouteHint(''), 3500);
+      showHint('Elige al menos 2 lugares en el mapa o activa tu GPS.');
       return;
     }
 
@@ -341,10 +416,7 @@ export default function App() {
     setMobilePanel('map');
 
     if (!userLocation) {
-      setLocationError(
-        'Activa tu GPS o usa "Marcar dónde estoy" para trazar el camino desde tu ubicación.'
-      );
-      setMobilePanel('list');
+      showHint('Activa tu GPS o usa "Marcar dónde estoy" para trazar el camino desde tu punto.');
       return;
     }
 
@@ -365,13 +437,6 @@ export default function App() {
     loadRoute(activeRoute.place, newMode, userLocation);
   };
 
-  const handleCloseRoute = () => {
-    if (routeAbortRef.current) {
-      routeAbortRef.current.abort();
-    }
-    setActiveRoute(null);
-  };
-
   const routeStopNumbers = useMemo(() => {
     const map = new Map();
     if (activeRoute?.stops?.length) {
@@ -384,7 +449,9 @@ export default function App() {
 
   const handleResetDefaults = () => {
     setPlaces(DEFAULT_PLACES);
+    setTourPlaceIds([]);
     setSelectedPlaceId(null);
+    handleCloseRoute();
   };
 
   const distanceFromCaliKm = userLocation
@@ -674,11 +741,12 @@ export default function App() {
         </div>
 
         <CaliMap
-          places={filteredPlaces}
+          places={mapPlaces}
           selectedPlaceId={selectedPlaceId}
           onSelectPlace={(id) => setSelectedPlaceId(id)}
           onShowRoute={handleShowRoute}
           onToggleTour={handleToggleTour}
+          onToggleVisited={handleToggleVisited}
           tourPlaceIds={tourPlaceIds}
           activeRoute={activeRoute}
           routeStopNumbers={routeStopNumbers}

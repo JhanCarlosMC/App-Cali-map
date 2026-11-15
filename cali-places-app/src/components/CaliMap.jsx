@@ -3,6 +3,10 @@ import L from 'leaflet';
 import { CALI_CENTER, CATEGORIES } from '../data/caliPlaces';
 import { estimateTravelTime, formatDistance, getDirectionsUrl } from '../utils/geo';
 
+function getIconKey(place, isSelected, stopNumber, isInTour) {
+  return `${place.category}|${place.visited ? 1 : 0}|${isSelected ? 1 : 0}|${stopNumber ?? ''}|${isInTour ? 1 : 0}`;
+}
+
 function createPlaceIcon(place, isSelected, stopNumber, isInTour) {
   const category = CATEGORIES[place.category] || { color: '#4f46e5' };
   const color = stopNumber != null ? '#0f172a' : place.visited ? '#64748b' : category.color;
@@ -44,16 +48,44 @@ function createUserIcon() {
   });
 }
 
-function buildPopupElement(place, userLocation, onShowRoute, isInTour, onToggleTour) {
+function buildPopupElement(
+  place,
+  userLocation,
+  onShowRoute,
+  isInTour,
+  onToggleTour,
+  onToggleVisited
+) {
   const category = CATEGORIES[place.category] || { label: 'Lugar', color: '#4f46e5' };
   const wrapper = document.createElement('div');
   wrapper.className = 'map-popup';
+
+  const topRow = document.createElement('div');
+  topRow.className = 'map-popup-top';
 
   const badge = document.createElement('span');
   badge.className = 'map-popup-badge';
   badge.style.backgroundColor = category.color;
   badge.textContent = category.label;
-  wrapper.appendChild(badge);
+  topRow.appendChild(badge);
+
+  if (onToggleVisited) {
+    let visited = Boolean(place.visited);
+    const visitBtn = document.createElement('button');
+    visitBtn.type = 'button';
+    visitBtn.className = `map-popup-visit-btn ${visited ? 'is-active' : ''}`;
+    visitBtn.textContent = visited ? 'Visitado ✓' : 'Por visitar';
+    visitBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      visited = !visited;
+      visitBtn.className = `map-popup-visit-btn ${visited ? 'is-active' : ''}`;
+      visitBtn.textContent = visited ? 'Visitado ✓' : 'Por visitar';
+      onToggleVisited(place.id);
+    });
+    topRow.appendChild(visitBtn);
+  }
+
+  wrapper.appendChild(topRow);
 
   const title = document.createElement('h3');
   title.className = 'map-popup-title';
@@ -131,6 +163,7 @@ export default function CaliMap({
   onSelectPlace,
   onShowRoute,
   onToggleTour,
+  onToggleVisited,
   tourPlaceIds,
   activeRoute,
   routeStopNumbers,
@@ -152,6 +185,7 @@ export default function CaliMap({
   const onSelectPlaceRef = useRef(onSelectPlace);
   const onShowRouteRef = useRef(onShowRoute);
   const onToggleTourRef = useRef(onToggleTour);
+  const onToggleVisitedRef = useRef(onToggleVisited);
   const tourPlaceIdsRef = useRef(tourPlaceIds);
   const placesRef = useRef(places);
   const userLocationRef = useRef(userLocation);
@@ -179,6 +213,10 @@ export default function CaliMap({
   }, [onToggleTour]);
 
   useEffect(() => {
+    onToggleVisitedRef.current = onToggleVisited;
+  }, [onToggleVisited]);
+
+  useEffect(() => {
     tourPlaceIdsRef.current = tourPlaceIds;
   }, [tourPlaceIds]);
 
@@ -194,12 +232,13 @@ export default function CaliMap({
     radiusKmRef.current = radiusKm;
   }, [radiusKm]);
 
-  // Initialize Leaflet map once
+  // Initialize Leaflet map once + ResizeObserver to prevent gray tiles on mobile resize
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return;
+    const container = containerRef.current;
+    if (!container || mapRef.current) return;
     const markersById = markersByIdRef.current;
 
-    const map = L.map(containerRef.current, {
+    const map = L.map(container, {
       center: [CALI_CENTER.lat, CALI_CENTER.lng],
       zoom: 13,
       zoomControl: false,
@@ -225,9 +264,15 @@ export default function CaliMap({
       }
     });
 
+    const resizeObserver = new ResizeObserver(() => {
+      map.invalidateSize({ animate: false });
+    });
+    resizeObserver.observe(container);
+
     mapRef.current = map;
 
     return () => {
+      resizeObserver.disconnect();
       map.remove();
       mapRef.current = null;
       markersLayerRef.current = null;
@@ -237,14 +282,13 @@ export default function CaliMap({
     };
   }, []);
 
-  // Sync place markers in place (never destroy open popups on selection/location updates)
+  // Sync place markers in place (only rebuild icon DOM when visual state changes)
   useEffect(() => {
     const layer = markersLayerRef.current;
     if (!layer) return;
 
     const nextIds = new Set(places.map((p) => p.id));
 
-    // Remove markers no longer in filtered places
     for (const [id, marker] of markersByIdRef.current.entries()) {
       if (!nextIds.has(id)) {
         layer.removeLayer(marker);
@@ -252,24 +296,32 @@ export default function CaliMap({
       }
     }
 
-    // Add or update markers in place
     places.forEach((place) => {
       const isSelected = place.id === selectedPlaceId;
       const stopNumber = routeStopNumbers?.get(place.id) ?? null;
       const isInTour = tourPlaceIds?.includes(place.id) ?? false;
+      const nextIconKey = getIconKey(place, isSelected, stopNumber, isInTour);
+      const nextZIndex = isSelected ? 500 : stopNumber != null ? 300 : isInTour ? 200 : 0;
       const existing = markersByIdRef.current.get(place.id);
 
       if (existing) {
         existing._placeData = place;
-        existing.setLatLng([place.lat, place.lng]);
-        existing.setIcon(createPlaceIcon(place, isSelected, stopNumber, isInTour));
-        existing.setZIndexOffset(isSelected ? 500 : stopNumber != null ? 300 : isInTour ? 200 : 0);
+        const pos = existing.getLatLng();
+        if (pos.lat !== place.lat || pos.lng !== place.lng) {
+          existing.setLatLng([place.lat, place.lng]);
+        }
+        if (existing._iconKey !== nextIconKey) {
+          existing.setIcon(createPlaceIcon(place, isSelected, stopNumber, isInTour));
+          existing._iconKey = nextIconKey;
+        }
+        existing.setZIndexOffset(nextZIndex);
       } else {
         const marker = L.marker([place.lat, place.lng], {
           icon: createPlaceIcon(place, isSelected, stopNumber, isInTour),
-          zIndexOffset: isSelected ? 500 : stopNumber != null ? 300 : isInTour ? 200 : 0,
+          zIndexOffset: nextZIndex,
         });
         marker._placeData = place;
+        marker._iconKey = nextIconKey;
 
         marker.bindPopup(
           () =>
@@ -278,7 +330,8 @@ export default function CaliMap({
               userLocationRef.current,
               onShowRouteRef.current,
               tourPlaceIdsRef.current?.includes(marker._placeData.id),
-              onToggleTourRef.current
+              onToggleTourRef.current,
+              onToggleVisitedRef.current
             ),
           { maxWidth: 280 }
         );
