@@ -3,19 +3,50 @@ import {
   Bike,
   ChevronDown,
   ChevronUp,
+  Compass,
   ExternalLink,
   Footprints,
   X,
 } from 'lucide-react';
 import {
+  calculateBearing,
+  calculateDistanceKm,
   formatDistance,
+  getCardinalDirection,
   getDirectionsUrl,
   getMultiStopDirectionsUrl,
+  getRelativeDirection,
 } from '../utils/geo';
+
+function getInitialRouteBearing(routeData, orderedStops, userLocation) {
+  if (!userLocation) return null;
+  const coords = routeData?.coordinates;
+  if (Array.isArray(coords) && coords.length >= 2) {
+    // Pick the first coordinate at least ~15 meters away from the user for a clean street bearing
+    for (let i = 1; i < coords.length; i += 1) {
+      const [lat, lng] = coords[i];
+      const dKm = calculateDistanceKm(userLocation.lat, userLocation.lng, lat, lng);
+      if (dKm >= 0.015 || i === coords.length - 1) {
+        return calculateBearing(userLocation.lat, userLocation.lng, lat, lng);
+      }
+    }
+  }
+  if (orderedStops.length > 0) {
+    return calculateBearing(
+      userLocation.lat,
+      userLocation.lng,
+      orderedStops[0].lat,
+      orderedStops[0].lng
+    );
+  }
+  return null;
+}
 
 export default function RoutePanel({
   activeRoute,
   userLocation,
+  userHeading,
+  onAlignHeading,
   onChangeMode,
   onSelectStop,
   onClose,
@@ -37,6 +68,14 @@ export default function RoutePanel({
 
   const legs = routeData?.legs || [];
   const hasUserOrigin = Boolean(userLocation);
+
+  const startBearing = getInitialRouteBearing(routeData, orderedStops, userLocation);
+  const startCardinal =
+    startBearing != null ? getCardinalDirection(startBearing) : null;
+  const relativeStart =
+    startBearing != null && userHeading != null
+      ? getRelativeDirection(userHeading, startBearing)
+      : null;
 
   return (
     <section className="route-panel" aria-label="Ruta en el mapa">
@@ -66,6 +105,35 @@ export default function RoutePanel({
             </li>
           ))}
         </ol>
+      )}
+
+      {startBearing != null && startCardinal && (
+        <div className="route-heading-guide">
+          <div className="route-heading-text">
+            <span className="route-heading-arrow" aria-hidden="true">
+              {relativeStart ? relativeStart.arrow : '↗'}
+            </span>
+            <div>
+              <strong>
+                {relativeStart ? relativeStart.text : `Hacia el ${startCardinal.label}`}
+              </strong>
+              <span className="route-heading-sub">
+                {' · '}Sal hacia el {startCardinal.label} ({Math.round(startBearing)}°)
+              </span>
+            </div>
+          </div>
+          {onAlignHeading && (
+            <button
+              type="button"
+              className="route-align-btn"
+              onClick={() => onAlignHeading(Math.round(startBearing))}
+              title="Apuntar mi vista en la dirección de inicio de esta ruta"
+            >
+              <Compass size={13} aria-hidden="true" />
+              <span>Mirar ruta</span>
+            </button>
+          )}
+        </div>
       )}
 
       <div className="route-mode-switch" role="group" aria-label="Modo de transporte">

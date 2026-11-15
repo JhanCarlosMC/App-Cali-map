@@ -1,9 +1,15 @@
-import { Check, MapPin, Navigation, Route, Trash2 } from 'lucide-react';
+import { Check, Compass, MapPin, Navigation, Route, Trash2 } from 'lucide-react';
 import { CATEGORIES } from '../data/caliPlaces';
-import { estimateTravelTime, formatDistance } from '../utils/geo';
+import {
+  estimateTravelTime,
+  formatDistance,
+  getCardinalDirection,
+  getRelativeDirection,
+} from '../utils/geo';
 
 export default function PlaceCard({
   place,
+  userHeading,
   isSelected,
   isInTour,
   onSelect,
@@ -16,6 +22,13 @@ export default function PlaceCard({
     label: 'Lugar',
     color: '#4f46e5',
   };
+
+  const cardinal =
+    place.bearingDeg != null ? getCardinalDirection(place.bearingDeg) : null;
+  const relativeDir =
+    place.bearingDeg != null && userHeading != null
+      ? getRelativeDirection(userHeading, place.bearingDeg)
+      : null;
 
   return (
     <article
@@ -34,10 +47,29 @@ export default function PlaceCard({
             {category.label}
           </span>
           {place.distanceKm != null && (
-            <span className="place-distance-pill">
-              <MapPin size={12} aria-hidden="true" />
-              <span>{formatDistance(place.distanceKm)}</span>
-            </span>
+            <div className="place-card-pills">
+              {cardinal && (
+                <span
+                  className="place-bearing-pill"
+                  title={
+                    relativeDir
+                      ? `${relativeDir.text} · Hacia el ${cardinal.label} (${Math.round(place.bearingDeg)}°)`
+                      : `Hacia el ${cardinal.label} (${Math.round(place.bearingDeg)}°)`
+                  }
+                >
+                  <Compass size={11} aria-hidden="true" />
+                  <span>
+                    {relativeDir
+                      ? `${relativeDir.arrow} ${relativeDir.short} (${cardinal.short})`
+                      : cardinal.short}
+                  </span>
+                </span>
+              )}
+              <span className="place-distance-pill">
+                <MapPin size={12} aria-hidden="true" />
+                <span>{formatDistance(place.distanceKm)}</span>
+              </span>
+            </div>
           )}
         </div>
 

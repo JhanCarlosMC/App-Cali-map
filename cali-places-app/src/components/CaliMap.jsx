@@ -1,7 +1,15 @@
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import { CALI_CENTER, CATEGORIES } from '../data/caliPlaces';
-import { estimateTravelTime, formatDistance, getDirectionsUrl } from '../utils/geo';
+import {
+  calculateBearing,
+  estimateTravelTime,
+  formatDistance,
+  getCardinalDirection,
+  getDirectionsUrl,
+  getRelativeDirection,
+  normalizeHeading,
+} from '../utils/geo';
 
 function getIconKey(place, isSelected, stopNumber, isInTour) {
   return `${place.category}|${place.visited ? 1 : 0}|${isSelected ? 1 : 0}|${stopNumber ?? ''}|${isInTour ? 1 : 0}`;
@@ -34,23 +42,35 @@ function createPlaceIcon(place, isSelected, stopNumber, isInTour) {
   });
 }
 
-function createUserIcon() {
+function createUserIcon(headingDeg = 0) {
+  const safeDeg = normalizeHeading(headingDeg);
   return L.divIcon({
     className: 'custom-user-marker',
     html: `
-      <div class="user-location-pin">
+      <div class="user-location-pin" style="--user-heading: ${safeDeg}deg">
+        <div class="user-compass-ring" aria-hidden="true">
+          <span class="user-ring-n">N</span>
+          <span class="user-ring-e">E</span>
+          <span class="user-ring-s">S</span>
+          <span class="user-ring-w">O</span>
+        </div>
+        <div class="user-heading-rotator" aria-hidden="true">
+          <span class="user-vision-cone"></span>
+          <span class="user-direction-arrow"></span>
+        </div>
         <span class="user-location-pulse"></span>
         <span class="user-location-core"></span>
       </div>
     `,
-    iconSize: [24, 24],
-    iconAnchor: [12, 12],
+    iconSize: [104, 104],
+    iconAnchor: [52, 52],
   });
 }
 
 function buildPopupElement(
   place,
   userLocation,
+  userHeading,
   onShowRoute,
   isInTour,
   onToggleTour,
@@ -109,7 +129,23 @@ function buildPopupElement(
   if (place.distanceKm != null) {
     const dist = document.createElement('p');
     dist.className = 'map-popup-distance';
-    dist.textContent = `A ${formatDistance(place.distanceKm)} (${estimateTravelTime(place.distanceKm)})`;
+    let text = `A ${formatDistance(place.distanceKm)} (${estimateTravelTime(place.distanceKm)})`;
+    if (userLocation) {
+      const bearing = calculateBearing(
+        userLocation.lat,
+        userLocation.lng,
+        place.lat,
+        place.lng
+      );
+      const cardinal = getCardinalDirection(bearing);
+      const rel = getRelativeDirection(userHeading ?? 0, bearing);
+      if (rel) {
+        text += ` · ${rel.arrow} ${rel.text} (${cardinal.short})`;
+      } else {
+        text += ` · Hacia el ${cardinal.label}`;
+      }
+    }
+    dist.textContent = text;
     wrapper.appendChild(dist);
   }
 
@@ -168,6 +204,8 @@ export default function CaliMap({
   activeRoute,
   routeStopNumbers,
   userLocation,
+  userHeading,
+  followUser,
   radiusKm,
   mapMode,
   onMapPick,
@@ -179,6 +217,7 @@ export default function CaliMap({
   const markersLayerRef = useRef(null);
   const markersByIdRef = useRef(new Map());
   const userLayerRef = useRef(null);
+  const userMarkerRef = useRef(null);
   const routeLayerRef = useRef(null);
   const mapModeRef = useRef(mapMode);
   const onMapPickRef = useRef(onMapPick);
@@ -189,6 +228,7 @@ export default function CaliMap({
   const tourPlaceIdsRef = useRef(tourPlaceIds);
   const placesRef = useRef(places);
   const userLocationRef = useRef(userLocation);
+  const userHeadingRef = useRef(userHeading);
   const radiusKmRef = useRef(radiusKm);
   const clickedFromMapRef = useRef(false);
 
@@ -227,6 +267,10 @@ export default function CaliMap({
   useEffect(() => {
     userLocationRef.current = userLocation;
   }, [userLocation]);
+
+  useEffect(() => {
+    userHeadingRef.current = userHeading;
+  }, [userHeading]);
 
   useEffect(() => {
     radiusKmRef.current = radiusKm;
@@ -328,6 +372,7 @@ export default function CaliMap({
             buildPopupElement(
               marker._placeData,
               userLocationRef.current,
+              userHeadingRef.current,
               onShowRouteRef.current,
               tourPlaceIdsRef.current?.includes(marker._placeData.id),
               onToggleTourRef.current,
@@ -376,6 +421,7 @@ export default function CaliMap({
     const layer = userLayerRef.current;
     if (!layer) return;
     layer.clearLayers();
+    userMarkerRef.current = null;
 
     if (!userLocation) return;
 
@@ -402,17 +448,56 @@ export default function CaliMap({
       }).addTo(layer);
     }
 
+    const headingDeg = normalizeHeading(userHeadingRef.current ?? 0);
+    const cardinal = getCardinalDirection(headingDeg);
     const userMarker = L.marker([userLocation.lat, userLocation.lng], {
-      icon: createUserIcon(),
+      icon: createUserIcon(headingDeg),
       zIndexOffset: 1000,
     });
 
-    const label = userLocation.isSimulated
-      ? 'Tu ubicación (simulada en Cali)'
+    const baseLabel = userLocation.isSimulated
+      ? 'Tu punto de referencia (simulado)'
       : 'Tu ubicación actual';
-    userMarker.bindTooltip(label, { direction: 'top', offset: [0, -10] });
+    userMarker.bindTooltip(
+      `${baseLabel} · Mirando al ${cardinal.label} (${Math.round(headingDeg)}°)`,
+      { direction: 'top', offset: [0, -28] }
+    );
     userMarker.addTo(layer);
+    userMarkerRef.current = userMarker;
   }, [userLocation, radiusKm]);
+
+  // Smoothly rotate user vision cone in-place when heading changes
+  useEffect(() => {
+    const marker = userMarkerRef.current;
+    const loc = userLocationRef.current;
+    if (!marker || !loc) return;
+
+    const headingDeg = normalizeHeading(userHeading ?? 0);
+    const el = marker.getElement();
+    if (el) {
+      const pinEl = el.querySelector('.user-location-pin');
+      if (pinEl) {
+        pinEl.style.setProperty('--user-heading', `${headingDeg}deg`);
+      }
+    }
+    const cardinal = getCardinalDirection(headingDeg);
+    const baseLabel = loc.isSimulated
+      ? 'Tu punto de referencia (simulado)'
+      : 'Tu ubicación actual';
+    marker.setTooltipContent(
+      `${baseLabel} · Mirando al ${cardinal.label} (${Math.round(headingDeg)}°)`
+    );
+  }, [userHeading]);
+
+  // Keep map centered on user when "followUser" is active
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !userLocation || !followUser) return;
+    map.panTo([userLocation.lat, userLocation.lng], {
+      animate: true,
+      duration: 0.45,
+    });
+  }, [userLocation, followUser]);
 
   // Draw active route polyline and fit map bounds
   useEffect(() => {

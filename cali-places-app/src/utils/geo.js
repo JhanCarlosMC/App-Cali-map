@@ -18,6 +18,97 @@ export function calculateDistanceKm(lat1, lng1, lat2, lng2) {
 }
 
 /**
+ * Normalizes any angle in degrees to [0, 360).
+ */
+export function normalizeHeading(deg) {
+  if (deg == null || Number.isNaN(Number(deg))) return 0;
+  return ((Number(deg) % 360) + 360) % 360;
+}
+
+/**
+ * Calculates initial compass bearing in degrees [0, 360) from point 1 to point 2.
+ * 0° = North, 90° = East, 180° = South, 270° = West.
+ */
+export function calculateBearing(lat1, lng1, lat2, lng2) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const toDeg = (rad) => (rad * 180) / Math.PI;
+
+  const phi1 = toRad(lat1);
+  const phi2 = toRad(lat2);
+  const dLambda = toRad(lng2 - lng1);
+
+  const y = Math.sin(dLambda) * Math.cos(phi2);
+  const x =
+    Math.cos(phi1) * Math.sin(phi2) -
+    Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLambda);
+
+  return normalizeHeading(toDeg(Math.atan2(y, x)));
+}
+
+const CARDINAL_POINTS = [
+  { short: 'N', label: 'Norte', deg: 0 },
+  { short: 'NE', label: 'Noreste', deg: 45 },
+  { short: 'E', label: 'Este', deg: 90 },
+  { short: 'SE', label: 'Sureste', deg: 135 },
+  { short: 'S', label: 'Sur', deg: 180 },
+  { short: 'SO', label: 'Suroeste', deg: 225 },
+  { short: 'O', label: 'Oeste', deg: 270 },
+  { short: 'NO', label: 'Noroeste', deg: 315 },
+];
+
+/**
+ * Returns the 8-wind cardinal direction for a given bearing in degrees.
+ */
+export function getCardinalDirection(deg) {
+  if (deg == null || Number.isNaN(Number(deg))) return CARDINAL_POINTS[0];
+  const normalized = normalizeHeading(deg);
+  const idx = Math.round(normalized / 45) % 8;
+  return CARDINAL_POINTS[idx];
+}
+
+export { CARDINAL_POINTS };
+
+/**
+ * Describes where a target bearing is relative to the direction the user is facing (`userHeading`).
+ */
+export function getRelativeDirection(userHeading, targetBearing) {
+  if (
+    userHeading == null ||
+    targetBearing == null ||
+    Number.isNaN(Number(userHeading)) ||
+    Number.isNaN(Number(targetBearing))
+  ) {
+    return null;
+  }
+
+  const diff = ((Number(targetBearing) - Number(userHeading) + 540) % 360) - 180;
+  const absDiff = Math.abs(diff);
+
+  if (absDiff <= 22.5) {
+    return { text: 'Frente a ti', short: 'Al frente', arrow: '↑', relativeDeg: diff };
+  }
+  if (diff > 22.5 && diff <= 67.5) {
+    return { text: 'Diagonal derecha', short: 'Diag. der.', arrow: '↗', relativeDeg: diff };
+  }
+  if (diff > 67.5 && diff <= 112.5) {
+    return { text: 'A tu derecha', short: 'A tu der.', arrow: '→', relativeDeg: diff };
+  }
+  if (diff > 112.5 && diff <= 157.5) {
+    return { text: 'Atrás a tu derecha', short: 'Atrás der.', arrow: '↘', relativeDeg: diff };
+  }
+  if (diff < -22.5 && diff >= -67.5) {
+    return { text: 'Diagonal izquierda', short: 'Diag. izq.', arrow: '↖', relativeDeg: diff };
+  }
+  if (diff < -67.5 && diff >= -112.5) {
+    return { text: 'A tu izquierda', short: 'A tu izq.', arrow: '←', relativeDeg: diff };
+  }
+  if (diff < -112.5 && diff >= -157.5) {
+    return { text: 'Atrás a tu izquierda', short: 'Atrás izq.', arrow: '↙', relativeDeg: diff };
+  }
+  return { text: 'Detrás de ti', short: 'Detrás', arrow: '↓', relativeDeg: diff };
+}
+
+/**
  * Formats a distance in km to a readable Spanish label.
  */
 export function formatDistance(km) {

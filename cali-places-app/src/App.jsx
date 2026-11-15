@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Compass,
+  Crosshair,
   List,
   LocateFixed,
   Map as MapIcon,
@@ -15,11 +16,15 @@ import CaliMap from './components/CaliMap';
 import PlaceCard from './components/PlaceCard';
 import AddPlaceDialog from './components/AddPlaceDialog';
 import RoutePanel from './components/RoutePanel';
+import CompassHud from './components/CompassHud';
 import { CALI_CENTER, CATEGORIES, DEFAULT_PLACES } from './data/caliPlaces';
 import {
+  calculateBearing,
   calculateDistanceKm,
   fetchMultiStopRoute,
   fetchRoute,
+  getCardinalDirection,
+  normalizeHeading,
   optimizeStopOrder,
 } from './utils/geo';
 import './App.css';
@@ -60,6 +65,47 @@ function loadInitialTourIds() {
   }
 }
 
+function computeTargetInfo(userLocation, activeRoute, selectedPlaceId, placesWithDistance) {
+  if (!userLocation) return null;
+  if (activeRoute) {
+    const coords = activeRoute.routeData?.coordinates;
+    if (Array.isArray(coords) && coords.length >= 2) {
+      for (let i = 1; i < coords.length; i += 1) {
+        const [lat, lng] = coords[i];
+        const dKm = calculateDistanceKm(userLocation.lat, userLocation.lng, lat, lng);
+        if (dKm >= 0.015 || i === coords.length - 1) {
+          return {
+            label: 'Inicio de ruta',
+            bearing: calculateBearing(userLocation.lat, userLocation.lng, lat, lng),
+          };
+        }
+      }
+    }
+    const firstTarget = activeRoute.stops?.[0] || activeRoute.place;
+    if (firstTarget) {
+      return {
+        label: firstTarget.name,
+        bearing: calculateBearing(
+          userLocation.lat,
+          userLocation.lng,
+          firstTarget.lat,
+          firstTarget.lng
+        ),
+      };
+    }
+  }
+  if (selectedPlaceId) {
+    const sel = placesWithDistance.find((p) => p.id === selectedPlaceId);
+    if (sel && sel.bearingDeg != null) {
+      return {
+        label: sel.name,
+        bearing: sel.bearingDeg,
+      };
+    }
+  }
+  return null;
+}
+
 export default function App() {
   const [places, setPlaces] = useState(loadInitialPlaces);
   const [selectedPlaceId, setSelectedPlaceId] = useState(null);
@@ -76,6 +122,11 @@ export default function App() {
   const [centerOnUserTrigger, setCenterOnUserTrigger] = useState(0);
   const [centerOnCaliTrigger, setCenterOnCaliTrigger] = useState(0);
 
+  const [userHeading, setUserHeading] = useState(0);
+  const [headingSource, setHeadingSource] = useState('manual');
+  const [compassStatus, setCompassStatus] = useState('idle');
+  const [followUser, setFollowUser] = useState(false);
+
   const [mapMode, setMapMode] = useState('browse');
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [pickedCoords, setPickedCoords] = useState(null);
@@ -86,6 +137,7 @@ export default function App() {
   const [routeHint, setRouteHint] = useState('');
   const routeAbortRef = useRef(null);
   const hintTimerRef = useRef(null);
+  const compassHandlerRef = useRef(null);
 
   const showHint = (msg) => {
     if (hintTimerRef.current) {
@@ -102,8 +154,109 @@ export default function App() {
     return () => {
       if (routeAbortRef.current) routeAbortRef.current.abort();
       if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+      if (compassHandlerRef.current) {
+        window.removeEventListener(
+          'deviceorientationabsolute',
+          compassHandlerRef.current,
+          true
+        );
+        window.removeEventListener(
+          'deviceorientation',
+          compassHandlerRef.current,
+          true
+        );
+      }
     };
   }, []);
+
+  const handleChangeHeading = (nextDeg, source = 'manual') => {
+    const normalized = normalizeHeading(nextDeg);
+    setUserHeading(normalized);
+    setHeadingSource(source);
+    if (source !== 'compass' && compassHandlerRef.current) {
+      window.removeEventListener(
+        'deviceorientationabsolute',
+        compassHandlerRef.current,
+        true
+      );
+      window.removeEventListener(
+        'deviceorientation',
+        compassHandlerRef.current,
+        true
+      );
+      compassHandlerRef.current = null;
+      setCompassStatus((prev) => (prev === 'active' ? 'idle' : prev));
+    }
+  };
+
+  const handleRequestCompass = async () => {
+    if (headingSource === 'compass' && compassStatus === 'active') {
+      handleChangeHeading(userHeading, 'manual');
+      return;
+    }
+
+    if (typeof window === 'undefined' || !('DeviceOrientationEvent' in window)) {
+      setCompassStatus('unsupported');
+      return;
+    }
+
+    if (
+      typeof window.DeviceOrientationEvent.requestPermission === 'function'
+    ) {
+      try {
+        const perm = await window.DeviceOrientationEvent.requestPermission();
+        if (perm !== 'granted') {
+          setCompassStatus('denied');
+          return;
+        }
+      } catch {
+        setCompassStatus('denied');
+        return;
+      }
+    }
+
+    let receivedReading = false;
+    const onOrientation = (event) => {
+      let compassDeg = null;
+      if (typeof event.webkitCompassHeading === 'number') {
+        compassDeg = event.webkitCompassHeading;
+      } else if (typeof event.alpha === 'number') {
+        compassDeg = 360 - event.alpha;
+      }
+      if (compassDeg != null && !Number.isNaN(compassDeg)) {
+        receivedReading = true;
+        setCompassStatus('active');
+        setHeadingSource('compass');
+        setUserHeading(normalizeHeading(Math.round(compassDeg)));
+      }
+    };
+
+    if (compassHandlerRef.current) {
+      window.removeEventListener(
+        'deviceorientationabsolute',
+        compassHandlerRef.current,
+        true
+      );
+      window.removeEventListener(
+        'deviceorientation',
+        compassHandlerRef.current,
+        true
+      );
+    }
+
+    compassHandlerRef.current = onOrientation;
+    window.addEventListener('deviceorientationabsolute', onOrientation, true);
+    window.addEventListener('deviceorientation', onOrientation, true);
+    setCompassStatus('active');
+    setHeadingSource('compass');
+
+    setTimeout(() => {
+      if (!receivedReading && compassHandlerRef.current === onOrientation) {
+        setCompassStatus('unsupported');
+        setHeadingSource('manual');
+      }
+    }, 1800);
+  };
 
   useEffect(() => {
     try {
@@ -164,12 +317,29 @@ export default function App() {
         const nextLat = pos.coords.latitude;
         const nextLng = pos.coords.longitude;
         const nextAcc = pos.coords.accuracy;
+        const gpsHeading = pos.coords.heading;
 
         setUserLocation((prev) => {
           if (prev?.isSimulated) return prev;
           if (prev) {
             const movedKm = calculateDistanceKm(prev.lat, prev.lng, nextLat, nextLng);
             if (movedKm < 0.015) return prev;
+
+            const walkBearing =
+              typeof gpsHeading === 'number' && !Number.isNaN(gpsHeading)
+                ? normalizeHeading(Math.round(gpsHeading))
+                : Math.round(calculateBearing(prev.lat, prev.lng, nextLat, nextLng));
+
+            setHeadingSource((src) => {
+              if (src !== 'compass') {
+                setUserHeading(walkBearing);
+                return 'gps';
+              }
+              return src;
+            });
+          } else if (typeof gpsHeading === 'number' && !Number.isNaN(gpsHeading)) {
+            setUserHeading(normalizeHeading(Math.round(gpsHeading)));
+            setHeadingSource('gps');
           }
           return {
             lat: nextLat,
@@ -194,7 +364,10 @@ export default function App() {
       const distanceKm = userLocation
         ? calculateDistanceKm(userLocation.lat, userLocation.lng, place.lat, place.lng)
         : null;
-      return { ...place, distanceKm };
+      const bearingDeg = userLocation
+        ? calculateBearing(userLocation.lat, userLocation.lng, place.lat, place.lng)
+        : null;
+      return { ...place, distanceKm, bearingDeg };
     });
   }, [places, userLocation]);
 
@@ -304,6 +477,21 @@ export default function App() {
       setLocationError('');
       setMapMode('browse');
       setCenterOnUserTrigger((n) => n + 1);
+    } else if (mapMode === 'pick-heading') {
+      if (userLocation) {
+        const aimedDeg = Math.round(
+          calculateBearing(
+            userLocation.lat,
+            userLocation.lng,
+            coords.lat,
+            coords.lng
+          )
+        );
+        handleChangeHeading(aimedDeg, 'map-aim');
+        const card = getCardinalDirection(aimedDeg);
+        showHint(`Vista orientada hacia el ${card.label} (${aimedDeg}°)`);
+      }
+      setMapMode('browse');
     }
   };
 
@@ -458,6 +646,15 @@ export default function App() {
     ? calculateDistanceKm(userLocation.lat, userLocation.lng, CALI_CENTER.lat, CALI_CENTER.lng)
     : null;
 
+  const targetInfo = computeTargetInfo(
+    userLocation,
+    activeRoute,
+    selectedPlaceId,
+    placesWithDistance
+  );
+
+  const currentCardinal = getCardinalDirection(userHeading);
+
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobilePanel === 'list' ? 'is-mobile-open' : ''}`}>
@@ -524,27 +721,57 @@ export default function App() {
             {locationError && <p className="location-note is-warning">{locationError}</p>}
 
             {userLocation && (
-              <div className="radius-row">
-                <span className="radius-label">A mi alrededor:</span>
-                <div className="radius-pills" role="group" aria-label="Filtrar por radio de distancia">
-                  {[
-                    { value: 0, label: 'Todos' },
-                    { value: 1, label: '1 km' },
-                    { value: 3, label: '3 km' },
-                    { value: 5, label: '5 km' },
-                  ].map((opt) => (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      className={`radius-pill ${radiusKm === opt.value ? 'is-active' : ''}`}
-                      onClick={() => setRadiusKm(opt.value)}
-                      aria-pressed={radiusKm === opt.value}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
+              <>
+                <div className="orientation-strip">
+                  <div className="orientation-strip-status">
+                    <Compass size={14} className="orientation-strip-icon" aria-hidden="true" />
+                    <span>
+                      Mirando al <strong>{currentCardinal.label}</strong> (
+                      {Math.round(userHeading)}°)
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className={`btn-aim-heading ${
+                      mapMode === 'pick-heading' ? 'is-active' : ''
+                    }`}
+                    onClick={() => {
+                      setMapMode((m) =>
+                        m === 'pick-heading' ? 'browse' : 'pick-heading'
+                      );
+                      setMobilePanel('map');
+                    }}
+                    title="Haz clic en la calle hacia donde estás mirando en el mapa"
+                  >
+                    <Crosshair size={13} aria-hidden="true" />
+                    <span>
+                      {mapMode === 'pick-heading' ? 'Cancelar' : 'Apuntar mi vista'}
+                    </span>
+                  </button>
                 </div>
-              </div>
+
+                <div className="radius-row">
+                  <span className="radius-label">A mi alrededor:</span>
+                  <div className="radius-pills" role="group" aria-label="Filtrar por radio de distancia">
+                    {[
+                      { value: 0, label: 'Todos' },
+                      { value: 1, label: '1 km' },
+                      { value: 3, label: '3 km' },
+                      { value: 5, label: '5 km' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        className={`radius-pill ${radiusKm === opt.value ? 'is-active' : ''}`}
+                        onClick={() => setRadiusKm(opt.value)}
+                        aria-pressed={radiusKm === opt.value}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
             )}
 
             {distanceFromCaliKm != null && distanceFromCaliKm > 30 && (
@@ -670,6 +897,7 @@ export default function App() {
               <PlaceCard
                 key={place.id}
                 place={place}
+                userHeading={userLocation ? userHeading : null}
                 isSelected={place.id === selectedPlaceId}
                 isInTour={tourPlaceIds.includes(place.id)}
                 onSelect={handleSelectPlace}
@@ -701,7 +929,9 @@ export default function App() {
             <span>
               {mapMode === 'pick-place'
                 ? 'Haz clic en el mapa de Cali para ubicar el nuevo lugar'
-                : 'Haz clic en el mapa para marcar tu ubicación actual'}
+                : mapMode === 'pick-heading'
+                  ? 'Toca la calle o esquina hacia donde estás mirando para orientar tu vista'
+                  : 'Haz clic en el mapa para marcar tu ubicación actual'}
             </span>
             <button
               type="button"
@@ -715,6 +945,30 @@ export default function App() {
             </button>
           </div>
         )}
+
+        <CompassHud
+          userLocation={userLocation}
+          userHeading={userHeading}
+          headingSource={headingSource}
+          compassStatus={compassStatus}
+          followUser={followUser}
+          mapMode={mapMode}
+          targetInfo={targetInfo}
+          onChangeHeading={handleChangeHeading}
+          onRequestCompass={handleRequestCompass}
+          onTogglePickHeading={() =>
+            setMapMode((m) => (m === 'pick-heading' ? 'browse' : 'pick-heading'))
+          }
+          onToggleFollowUser={() => {
+            setFollowUser((prev) => {
+              const next = !prev;
+              if (next) setCenterOnUserTrigger((n) => n + 1);
+              return next;
+            });
+          }}
+          onCenterOnUser={() => setCenterOnUserTrigger((n) => n + 1)}
+          onRequestPickLocation={() => setMapMode('pick-location')}
+        />
 
         <div className="map-floating-controls">
           <button
@@ -751,6 +1005,8 @@ export default function App() {
           activeRoute={activeRoute}
           routeStopNumbers={routeStopNumbers}
           userLocation={userLocation}
+          userHeading={userHeading}
+          followUser={followUser}
           radiusKm={radiusKm}
           mapMode={mapMode}
           onMapPick={handleMapPick}
@@ -789,6 +1045,8 @@ export default function App() {
         <RoutePanel
           activeRoute={activeRoute}
           userLocation={userLocation}
+          userHeading={userHeading}
+          onAlignHeading={(deg) => handleChangeHeading(deg, 'manual')}
           onChangeMode={handleChangeRouteMode}
           onSelectStop={(id) => setSelectedPlaceId(id)}
           onClose={handleCloseRoute}
