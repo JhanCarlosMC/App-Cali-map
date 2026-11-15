@@ -3,18 +3,27 @@ import L from 'leaflet';
 import { CALI_CENTER, CATEGORIES } from '../data/caliPlaces';
 import { estimateTravelTime, formatDistance, getDirectionsUrl } from '../utils/geo';
 
-function createPlaceIcon(place, isSelected) {
+function createPlaceIcon(place, isSelected, stopNumber, isInTour) {
   const category = CATEGORIES[place.category] || { color: '#4f46e5' };
-  const color = place.visited ? '#64748b' : category.color;
-  const size = isSelected ? 36 : 28;
-  const ring = isSelected ? 'box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.35), 0 4px 12px rgba(0,0,0,0.35);' : 'box-shadow: 0 3px 8px rgba(0,0,0,0.3);';
-  const checkMark = place.visited
-    ? `<span class="map-pin-check" aria-hidden="true">✓</span>`
-    : `<span class="map-pin-dot"></span>`;
+  const color = stopNumber != null ? '#0f172a' : place.visited ? '#64748b' : category.color;
+  const size = isSelected || stopNumber != null ? 34 : 28;
+  let ring = 'box-shadow: 0 3px 8px rgba(0,0,0,0.3);';
+  if (isSelected) {
+    ring = 'box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.35), 0 4px 12px rgba(0,0,0,0.35);';
+  } else if (isInTour && stopNumber == null) {
+    ring = 'box-shadow: 0 0 0 3px #0f172a, 0 4px 10px rgba(0,0,0,0.35);';
+  }
+
+  let innerHtml = `<span class="map-pin-dot"></span>`;
+  if (stopNumber != null) {
+    innerHtml = `<span class="map-pin-number">${stopNumber}</span>`;
+  } else if (place.visited) {
+    innerHtml = `<span class="map-pin-check" aria-hidden="true">✓</span>`;
+  }
 
   return L.divIcon({
     className: 'custom-place-marker',
-    html: `<div class="map-pin ${isSelected ? 'is-selected' : ''} ${place.visited ? 'is-visited' : ''}" style="width:${size}px;height:${size}px;background:${color};${ring}">${checkMark}</div>`,
+    html: `<div class="map-pin ${isSelected ? 'is-selected' : ''} ${place.visited ? 'is-visited' : ''} ${stopNumber != null ? 'is-route-stop' : ''} ${isInTour ? 'is-in-tour' : ''}" style="width:${size}px;height:${size}px;background:${color};${ring}">${innerHtml}</div>`,
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
     popupAnchor: [0, -size / 2],
@@ -35,7 +44,7 @@ function createUserIcon() {
   });
 }
 
-function buildPopupElement(place, userLocation, onShowRoute) {
+function buildPopupElement(place, userLocation, onShowRoute, isInTour, onToggleTour) {
   const category = CATEGORIES[place.category] || { label: 'Lugar', color: '#4f46e5' };
   const wrapper = document.createElement('div');
   wrapper.className = 'map-popup';
@@ -79,11 +88,28 @@ function buildPopupElement(place, userLocation, onShowRoute) {
     const routeBtn = document.createElement('button');
     routeBtn.type = 'button';
     routeBtn.className = 'map-popup-route-btn';
-    routeBtn.textContent = 'Ver camino aquí';
-    routeBtn.addEventListener('click', () => {
+    routeBtn.textContent = 'Ir aquí';
+    routeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
       onShowRoute(place);
     });
     actions.appendChild(routeBtn);
+  }
+
+  if (onToggleTour) {
+    let selected = Boolean(isInTour);
+    const tourBtn = document.createElement('button');
+    tourBtn.type = 'button';
+    tourBtn.className = `map-popup-tour-btn ${selected ? 'is-active' : ''}`;
+    tourBtn.textContent = selected ? 'En ruta ✓' : '+ Ruta';
+    tourBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      selected = !selected;
+      tourBtn.className = `map-popup-tour-btn ${selected ? 'is-active' : ''}`;
+      tourBtn.textContent = selected ? 'En ruta ✓' : '+ Ruta';
+      onToggleTour(place.id);
+    });
+    actions.appendChild(tourBtn);
   }
 
   const link = document.createElement('a');
@@ -91,7 +117,7 @@ function buildPopupElement(place, userLocation, onShowRoute) {
   link.href = getDirectionsUrl(place.lat, place.lng, userLocation);
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
-  link.textContent = 'Google Maps ↗';
+  link.textContent = 'Maps ↗';
   actions.appendChild(link);
 
   wrapper.appendChild(actions);
@@ -104,7 +130,10 @@ export default function CaliMap({
   selectedPlaceId,
   onSelectPlace,
   onShowRoute,
+  onToggleTour,
+  tourPlaceIds,
   activeRoute,
+  routeStopNumbers,
   userLocation,
   radiusKm,
   mapMode,
@@ -122,9 +151,12 @@ export default function CaliMap({
   const onMapPickRef = useRef(onMapPick);
   const onSelectPlaceRef = useRef(onSelectPlace);
   const onShowRouteRef = useRef(onShowRoute);
+  const onToggleTourRef = useRef(onToggleTour);
+  const tourPlaceIdsRef = useRef(tourPlaceIds);
   const placesRef = useRef(places);
   const userLocationRef = useRef(userLocation);
   const radiusKmRef = useRef(radiusKm);
+  const clickedFromMapRef = useRef(false);
 
   useEffect(() => {
     mapModeRef.current = mapMode;
@@ -143,6 +175,14 @@ export default function CaliMap({
   }, [onShowRoute]);
 
   useEffect(() => {
+    onToggleTourRef.current = onToggleTour;
+  }, [onToggleTour]);
+
+  useEffect(() => {
+    tourPlaceIdsRef.current = tourPlaceIds;
+  }, [tourPlaceIds]);
+
+  useEffect(() => {
     placesRef.current = places;
   }, [places]);
 
@@ -157,6 +197,7 @@ export default function CaliMap({
   // Initialize Leaflet map once
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
+    const markersById = markersByIdRef.current;
 
     const map = L.map(containerRef.current, {
       center: [CALI_CENTER.lat, CALI_CENTER.lng],
@@ -189,44 +230,81 @@ export default function CaliMap({
     return () => {
       map.remove();
       mapRef.current = null;
+      markersLayerRef.current = null;
+      routeLayerRef.current = null;
+      userLayerRef.current = null;
+      markersById.clear();
     };
   }, []);
 
-  // Sync place markers
+  // Sync place markers in place (never destroy open popups on selection/location updates)
   useEffect(() => {
     const layer = markersLayerRef.current;
     if (!layer) return;
 
-    layer.clearLayers();
-    markersByIdRef.current.clear();
+    const nextIds = new Set(places.map((p) => p.id));
 
+    // Remove markers no longer in filtered places
+    for (const [id, marker] of markersByIdRef.current.entries()) {
+      if (!nextIds.has(id)) {
+        layer.removeLayer(marker);
+        markersByIdRef.current.delete(id);
+      }
+    }
+
+    // Add or update markers in place
     places.forEach((place) => {
       const isSelected = place.id === selectedPlaceId;
-      const marker = L.marker([place.lat, place.lng], {
-        icon: createPlaceIcon(place, isSelected),
-        zIndexOffset: isSelected ? 500 : 0,
-      });
+      const stopNumber = routeStopNumbers?.get(place.id) ?? null;
+      const isInTour = tourPlaceIds?.includes(place.id) ?? false;
+      const existing = markersByIdRef.current.get(place.id);
 
-      marker.bindPopup(
-        () => buildPopupElement(place, userLocation, onShowRouteRef.current),
-        { maxWidth: 270 }
-      );
+      if (existing) {
+        existing._placeData = place;
+        existing.setLatLng([place.lat, place.lng]);
+        existing.setIcon(createPlaceIcon(place, isSelected, stopNumber, isInTour));
+        existing.setZIndexOffset(isSelected ? 500 : stopNumber != null ? 300 : isInTour ? 200 : 0);
+      } else {
+        const marker = L.marker([place.lat, place.lng], {
+          icon: createPlaceIcon(place, isSelected, stopNumber, isInTour),
+          zIndexOffset: isSelected ? 500 : stopNumber != null ? 300 : isInTour ? 200 : 0,
+        });
+        marker._placeData = place;
 
-      marker.on('click', () => {
-        if (onSelectPlaceRef.current) {
-          onSelectPlaceRef.current(place.id);
-        }
-      });
+        marker.bindPopup(
+          () =>
+            buildPopupElement(
+              marker._placeData,
+              userLocationRef.current,
+              onShowRouteRef.current,
+              tourPlaceIdsRef.current?.includes(marker._placeData.id),
+              onToggleTourRef.current
+            ),
+          { maxWidth: 280 }
+        );
 
-      marker.addTo(layer);
-      markersByIdRef.current.set(place.id, marker);
+        marker.on('click', () => {
+          clickedFromMapRef.current = true;
+          if (onSelectPlaceRef.current) {
+            onSelectPlaceRef.current(place.id);
+          }
+        });
+
+        marker.addTo(layer);
+        markersByIdRef.current.set(place.id, marker);
+      }
     });
-  }, [places, selectedPlaceId, userLocation]);
+  }, [places, selectedPlaceId, routeStopNumbers, tourPlaceIds]);
 
-  // Open popup and fly to selected place
+  // Fly to and open popup only when selected from the list (not when tapped directly on the map)
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !selectedPlaceId) return;
+
+    if (clickedFromMapRef.current) {
+      clickedFromMapRef.current = false;
+      return;
+    }
 
     const place = placesRef.current.find((p) => p.id === selectedPlaceId);
     const marker = markersByIdRef.current.get(selectedPlaceId);
@@ -235,7 +313,9 @@ export default function CaliMap({
     map.flyTo([place.lat, place.lng], Math.max(map.getZoom(), 15), {
       duration: 0.6,
     });
-    marker.openPopup();
+    if (!marker.isPopupOpen()) {
+      marker.openPopup();
+    }
   }, [selectedPlaceId]);
 
   // Sync user location pin + accuracy + "around me" radius circle
@@ -293,7 +373,6 @@ export default function CaliMap({
 
     const isWalk = activeRoute.mode === 'walk';
 
-    // White casing for contrast against map streets
     L.polyline(coords, {
       color: '#ffffff',
       weight: isWalk ? 7 : 8,

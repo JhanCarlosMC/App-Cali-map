@@ -7,6 +7,7 @@ import {
   MapPin,
   Plus,
   RotateCcw,
+  Route,
   Search,
   X,
 } from 'lucide-react';
@@ -15,7 +16,12 @@ import PlaceCard from './components/PlaceCard';
 import AddPlaceDialog from './components/AddPlaceDialog';
 import RoutePanel from './components/RoutePanel';
 import { CALI_CENTER, CATEGORIES, DEFAULT_PLACES } from './data/caliPlaces';
-import { calculateDistanceKm, fetchRoute } from './utils/geo';
+import {
+  calculateDistanceKm,
+  fetchMultiStopRoute,
+  fetchRoute,
+  optimizeStopOrder,
+} from './utils/geo';
 import './App.css';
 
 const STORAGE_KEY = 'cali-places-app:v1';
@@ -63,7 +69,9 @@ export default function App() {
   const [pickedCoords, setPickedCoords] = useState(null);
 
   const [mobilePanel, setMobilePanel] = useState('map');
+  const [tourPlaceIds, setTourPlaceIds] = useState([]);
   const [activeRoute, setActiveRoute] = useState(null);
+  const [routeHint, setRouteHint] = useState('');
   const routeAbortRef = useRef(null);
 
   useEffect(() => {
@@ -227,6 +235,12 @@ export default function App() {
     setMobilePanel('map');
   };
 
+  const handleToggleTour = (id) => {
+    setTourPlaceIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
   const loadRoute = async (place, mode, fromLocation) => {
     if (routeAbortRef.current) {
       routeAbortRef.current.abort();
@@ -236,6 +250,7 @@ export default function App() {
 
     setActiveRoute({
       place,
+      stops: null,
       mode,
       routeData: null,
       loading: true,
@@ -249,7 +264,7 @@ export default function App() {
         signal: controller.signal,
       });
       setActiveRoute((prev) =>
-        prev && prev.place.id === place.id && prev.mode === mode
+        prev && prev.place?.id === place.id && prev.mode === mode
           ? { ...prev, routeData, loading: false }
           : prev
       );
@@ -258,6 +273,67 @@ export default function App() {
         setActiveRoute((prev) => (prev ? { ...prev, loading: false } : null));
       }
     }
+  };
+
+  const loadMultiStopRoute = async (orderedStops, mode, startLocation) => {
+    if (routeAbortRef.current) {
+      routeAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    routeAbortRef.current = controller;
+
+    setActiveRoute({
+      place: orderedStops[0],
+      stops: orderedStops,
+      mode,
+      routeData: null,
+      loading: true,
+    });
+
+    const waypoints = startLocation
+      ? [startLocation, ...orderedStops]
+      : orderedStops;
+
+    try {
+      const routeData = await fetchMultiStopRoute({
+        waypoints,
+        mode,
+        signal: controller.signal,
+      });
+      setActiveRoute((prev) =>
+        prev && prev.stops && prev.mode === mode
+          ? { ...prev, routeData, loading: false }
+          : prev
+      );
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        setActiveRoute((prev) => (prev ? { ...prev, loading: false } : null));
+      }
+    }
+  };
+
+  const handleBuildOptimalRoute = (modeOverride) => {
+    const selectedPlaces = tourPlaceIds
+      .map((id) => places.find((p) => p.id === id))
+      .filter(Boolean);
+
+    if (selectedPlaces.length === 0) {
+      setRouteHint('Toca los puntos en el mapa y presiona "+ Ruta" para armar tu recorrido.');
+      setTimeout(() => setRouteHint(''), 3500);
+      return;
+    }
+
+    if (selectedPlaces.length === 1 && !userLocation) {
+      setRouteHint('Elige al menos 2 lugares en el mapa o activa tu GPS.');
+      setTimeout(() => setRouteHint(''), 3500);
+      return;
+    }
+
+    setRouteHint('');
+    const orderedStops = optimizeStopOrder(selectedPlaces, userLocation);
+    const mode = modeOverride || activeRoute?.mode || 'walk';
+    setMobilePanel('map');
+    loadMultiStopRoute(orderedStops, mode, userLocation);
   };
 
   const handleShowRoute = (place) => {
@@ -280,7 +356,12 @@ export default function App() {
   };
 
   const handleChangeRouteMode = (newMode) => {
-    if (!activeRoute || !userLocation || activeRoute.mode === newMode) return;
+    if (!activeRoute || activeRoute.mode === newMode) return;
+    if (activeRoute.stops && activeRoute.stops.length > 0) {
+      loadMultiStopRoute(activeRoute.stops, newMode, userLocation);
+      return;
+    }
+    if (!userLocation || !activeRoute.place) return;
     loadRoute(activeRoute.place, newMode, userLocation);
   };
 
@@ -290,6 +371,16 @@ export default function App() {
     }
     setActiveRoute(null);
   };
+
+  const routeStopNumbers = useMemo(() => {
+    const map = new Map();
+    if (activeRoute?.stops?.length) {
+      activeRoute.stops.forEach((stop, idx) => {
+        map.set(stop.id, idx + 1);
+      });
+    }
+    return map;
+  }, [activeRoute]);
 
   const handleResetDefaults = () => {
     setPlaces(DEFAULT_PLACES);
@@ -462,6 +553,38 @@ export default function App() {
         </header>
 
         <div className="places-list" role="region" aria-label="Listado de lugares">
+          {tourPlaceIds.length > 0 && (
+            <div className="tour-builder-bar">
+              <div className="tour-builder-info">
+                <Route size={16} aria-hidden="true" />
+                <span>
+                  <strong>{tourPlaceIds.length}</strong>{' '}
+                  {tourPlaceIds.length === 1 ? 'sitio en tu ruta' : 'sitios en tu ruta'}
+                </span>
+              </div>
+              <div className="tour-builder-actions">
+                <button
+                  type="button"
+                  className="btn-tour-clear"
+                  onClick={() => {
+                    setTourPlaceIds([]);
+                    if (activeRoute?.stops) handleCloseRoute();
+                  }}
+                >
+                  Limpiar
+                </button>
+                <button
+                  type="button"
+                  className="btn-tour-go"
+                  disabled={tourPlaceIds.length < 2 && !userLocation}
+                  onClick={() => handleBuildOptimalRoute()}
+                >
+                  Ruta óptima
+                </button>
+              </div>
+            </div>
+          )}
+
           {filteredPlaces.length === 0 ? (
             <div className="empty-state">
               <p>No hay lugares que coincidan con este filtro.</p>
@@ -481,8 +604,10 @@ export default function App() {
                 key={place.id}
                 place={place}
                 isSelected={place.id === selectedPlaceId}
+                isInTour={tourPlaceIds.includes(place.id)}
                 onSelect={handleSelectPlace}
                 onShowRoute={handleShowRoute}
+                onToggleTour={handleToggleTour}
                 onToggleVisited={handleToggleVisited}
                 onDelete={handleDeletePlace}
               />
@@ -553,7 +678,10 @@ export default function App() {
           selectedPlaceId={selectedPlaceId}
           onSelectPlace={(id) => setSelectedPlaceId(id)}
           onShowRoute={handleShowRoute}
+          onToggleTour={handleToggleTour}
+          tourPlaceIds={tourPlaceIds}
           activeRoute={activeRoute}
+          routeStopNumbers={routeStopNumbers}
           userLocation={userLocation}
           radiusKm={radiusKm}
           mapMode={mapMode}
@@ -562,10 +690,39 @@ export default function App() {
           centerOnCaliTrigger={centerOnCaliTrigger}
         />
 
+        {routeHint && (
+          <div className="map-hint-toast" role="status">
+            {routeHint}
+          </div>
+        )}
+
+        {tourPlaceIds.length > 0 && !activeRoute && (
+          <div className="map-tour-cta">
+            <button
+              type="button"
+              className="btn-map-tour-go"
+              onClick={() => handleBuildOptimalRoute()}
+            >
+              <Route size={16} aria-hidden="true" />
+              <span>Generar ruta ({tourPlaceIds.length})</span>
+            </button>
+            <button
+              type="button"
+              className="btn-map-tour-clear"
+              onClick={() => setTourPlaceIds([])}
+              aria-label="Limpiar selección de ruta"
+              title="Limpiar selección"
+            >
+              <X size={15} aria-hidden="true" />
+            </button>
+          </div>
+        )}
+
         <RoutePanel
           activeRoute={activeRoute}
           userLocation={userLocation}
           onChangeMode={handleChangeRouteMode}
+          onSelectStop={(id) => setSelectedPlaceId(id)}
           onClose={handleCloseRoute}
         />
 
@@ -574,17 +731,31 @@ export default function App() {
             type="button"
             className={mobilePanel === 'map' ? 'is-active' : ''}
             onClick={() => setMobilePanel('map')}
+            aria-label="Ver mapa"
+            title="Ver mapa"
           >
-            <MapIcon size={16} aria-hidden="true" />
-            <span>Mapa</span>
+            <MapIcon size={20} aria-hidden="true" />
           </button>
           <button
             type="button"
             className={mobilePanel === 'list' ? 'is-active' : ''}
             onClick={() => setMobilePanel('list')}
+            aria-label={`Ver lista (${filteredPlaces.length})`}
+            title={`Ver lista (${filteredPlaces.length})`}
           >
-            <List size={16} aria-hidden="true" />
-            <span>Lista ({filteredPlaces.length})</span>
+            <List size={20} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className={`btn-switcher-route ${activeRoute?.stops ? 'is-active' : ''}`}
+            onClick={() => handleBuildOptimalRoute()}
+            aria-label={`Generar ruta óptima (${tourPlaceIds.length} seleccionados)`}
+            title="Generar ruta óptima"
+          >
+            <Route size={20} aria-hidden="true" />
+            {tourPlaceIds.length > 0 && (
+              <span className="switcher-badge">{tourPlaceIds.length}</span>
+            )}
           </button>
         </div>
       </main>

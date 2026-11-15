@@ -1,12 +1,14 @@
-import { Check, MapPin, Navigation, Trash2 } from 'lucide-react';
+import { Check, MapPin, Navigation, Route, Trash2 } from 'lucide-react';
 import { CATEGORIES } from '../data/caliPlaces';
 import { estimateTravelTime, formatDistance } from '../utils/geo';
 
 export default function PlaceCard({
   place,
   isSelected,
+  isInTour,
   onSelect,
   onShowRoute,
+  onToggleTour,
   onToggleVisited,
   onDelete,
 }) {
@@ -67,6 +69,17 @@ export default function PlaceCard({
         >
           <Check size={14} aria-hidden="true" />
           <span>{place.visited ? 'Visitado' : 'Por visitar'}</span>
+        </button>
+
+        <button
+          type="button"
+          className={`btn-tour-toggle ${isInTour ? 'is-active' : ''}`}
+          onClick={() => onToggleTour(place.id)}
+          aria-pressed={isInTour}
+          title={isInTour ? 'Quitar de la ruta óptima' : 'Agregar a ruta óptima'}
+        >
+          <Route size={14} aria-hidden="true" />
+          <span>{isInTour ? 'En ruta' : '+ Ruta'}</span>
         </button>
 
         <button
